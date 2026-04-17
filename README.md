@@ -29,7 +29,6 @@ Code is edited locally, synced via rsync, and run exclusively via `docker-compos
 | Tool | Install |
 |---|---|
 | Git | pre-installed on Mac, or `brew install git` Install Homebrew first: /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" | 
-
 | rsync | `brew install rsync` (Mac) |
 | SSH key | `~/.ssh/id_ed25519` — must be registered in RunPod |
 

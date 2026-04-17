@@ -28,8 +28,8 @@ Code is edited locally, synced via rsync, and run exclusively via `docker-compos
 
 | Tool | Install |
 |---|---|
-| Git | pre-installed on Mac, or `brew install git` Install Homebrew first: /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" | 
-| rsync | `brew install rsync` (Mac) |
+| Git | pre-installed on Mac, or `brew install git` Install Homebrew first: /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" ---> Homebrew installed successfully, but you need to add it to your PATH first. Run this: eval "$(/opt/homebrew/bin/brew shellenv zsh)"-->Then verify it works: brew --version| 
+| rsync | `brew install rsync` (Mac) --> To make this permanent (so brew works in every new terminal), also run: echo 'eval "$(/opt/homebrew/bin/brew shellenv zsh)"' >> ~/.zprofile|
 | SSH key | `~/.ssh/id_ed25519` — must be registered in RunPod |
 
 ### RunPod

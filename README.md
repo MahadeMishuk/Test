@@ -1,65 +1,65 @@
 # AI Eyes on the Road — User Manual
 
-Complete step-by-step guide for running the pothole detection system.  
-Three deployment paths are covered: local Python, Docker (CPU), and RunPod GPU.
+**Deployment platform: RunPod GPU only.**  
+All execution happens inside a Docker container on a RunPod cloud GPU instance (A40 or equivalent).  
+Code is edited locally, synced via rsync, and run exclusively via `docker-compose.gpu.yml`.
 
 ---
 
 ## Table of Contents
 
 1. [Prerequisites](#1-prerequisites)
-2. [Project Structure Overview](#2-project-structure-overview)
-3. [Environment Setup (.env)](#3-environment-setup-env)
-4. [Path A — Run Locally (Python)](#4-path-a--run-locally-python)
-5. [Path B — Run with Docker (CPU, any machine)](#5-path-b--run-with-docker-cpu-any-machine)
-6. [Path C — Run on RunPod GPU](#6-path-c--run-on-runpod-gpu)
-7. [Using the Dashboard](#7-using-the-dashboard)
-8. [REST API Reference](#8-rest-api-reference)
-9. [Configuration Reference](#9-configuration-reference)
-10. [Troubleshooting](#10-troubleshooting)
+2. [Project Structure](#2-project-structure)
+3. [One-Time Setup](#3-one-time-setup)
+4. [Deploy to RunPod](#4-deploy-to-runpod)
+5. [Access the Dashboard](#5-access-the-dashboard)
+6. [Managing the Container](#6-managing-the-container)
+7. [Re-Deploy After Code Changes](#7-re-deploy-after-code-changes)
+8. [Using the Dashboard](#8-using-the-dashboard)
+9. [REST API Reference](#9-rest-api-reference)
+10. [Configuration Reference](#10-configuration-reference)
+11. [Troubleshooting](#11-troubleshooting)
 
 ---
 
 ## 1. Prerequisites
 
-### For Local / Docker (CPU)
+### Local machine (Mac/Linux — for editing and syncing only)
 
-| Requirement | Version | Notes |
-|---|---|---|
-| Python | 3.11 or 3.12 | `python --version` |
-| pip | latest | `pip install --upgrade pip` |
-| Docker Desktop | 4.x | [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop) |
-| Docker Compose | V2 (bundled) | `docker compose version` |
-| Git | any | to clone the repo |
+| Tool | Install |
+|---|---|
+| Git | pre-installed on Mac, or `brew install git` |
+| rsync | `brew install rsync` (Mac) |
+| SSH key | `~/.ssh/id_ed25519` — must be registered in RunPod |
 
-### For RunPod GPU
+### RunPod
 
 | Requirement | Notes |
 |---|---|
 | RunPod account | [runpod.io](https://www.runpod.io) |
-| SSH key registered in RunPod | Settings → SSH Keys |
-| rsync (local Mac/Linux) | `brew install rsync` on Mac |
-| Pod with CUDA 12.x GPU | A40 recommended (48 GB VRAM) |
+| GPU pod running | A40 (48 GB VRAM) recommended |
+| SSH key registered | RunPod dashboard → Settings → SSH Keys |
+| Pod exposes port 5001 | Set when creating the pod |
 
 ---
 
-## 2. Project Structure Overview
+## 2. Project Structure
 
 ```
 Pothole-I/
 ├── app.py                     # Flask + SocketIO entry point
-├── config.py                  # All env-var settings in one place
+├── config.py                  # All settings (env-var driven)
 ├── requirements.txt           # Python dependencies
 │
 ├── pipeline/
 │   ├── processor.py           # Per-frame CV orchestrator
-│   ├── segmentation.py        # DeepLabV3 road mask
+│   ├── segmentation.py        # DeepLabV3 road mask (runs on CUDA)
 │   ├── lane_detection.py      # Canny + Hough lane polygon
-│   ├── detection.py           # YOLO pothole + COCO objects
+│   ├── detection.py           # YOLO pothole + COCO objects (CUDA)
 │   └── depth.py               # Monocular distance estimation
 │
 ├── models/
-│   └── model_manager.py       # Lazy model loader
+│   └── model_manager.py       # Lazy model loader → cuda:0
 │
 ├── tracking/                  # SORT tracker (Kalman + Hungarian)
 ├── alerts/                    # Audio + visual alert manager
@@ -70,39 +70,62 @@ Pothole-I/
 ├── static/                    # CSS, JS, icons
 ├── templates/index.html       # Main dashboard HTML
 │
-├── uploads/                   # Uploaded video files (runtime)
-├── outputs/                   # Annotated output videos (runtime)
-├── .cache/torch/              # Pretrained model weight cache
+├── uploads/                   # Uploaded video files (volume-mounted)
+├── outputs/                   # Annotated output videos (volume-mounted)
+├── .cache/torch/              # Pretrained weight cache (volume-mounted)
 │
-├── Dockerfile                 # CPU image (Python 3.12 slim)
-├── Dockerfile.gpu             # GPU image (CUDA 12.4 + cuDNN)
-├── docker-compose.yml         # CPU compose
-├── docker-compose.gpu.yml     # GPU compose (RunPod)
-├── .env                       # CPU secrets (never commit)
-├── .env.gpu                   # GPU secrets (never commit)
+├── Dockerfile.gpu             # CUDA 12.4 + cuDNN image (RunPod)
+├── docker-compose.gpu.yml     # GPU compose — the only compose file used
+├── .env.gpu                   # RunPod secrets — NEVER commit
 └── scripts/
-    ├── deploy_runpod.sh       # One-command RunPod deploy
+    ├── deploy_runpod.sh       # One-command sync + build + start
     └── verify_gpu.py          # GPU readiness checker
 ```
 
 ---
 
-## 3. Environment Setup (.env)
+## 3. One-Time Setup
 
-The app reads all secrets from environment files. You must configure these before running anything.
+### 3.1 — Register your SSH key in RunPod
 
-### 3.1 CPU / Local
+1. Open RunPod dashboard → **Settings** → **SSH Keys**
+2. Paste the contents of `~/.ssh/id_ed25519.pub`
+3. Save
 
-Edit `.env` in the project root:
+Verify your local key exists:
+```bash
+cat ~/.ssh/id_ed25519.pub
+```
+
+### 3.2 — Create a RunPod pod
+
+1. RunPod dashboard → **Deploy** → **GPU Pod**
+2. Select GPU: **A40** (48 GB VRAM) or equivalent
+3. Template: **RunPod PyTorch 2.4.1** (ships with CUDA 12.4, Docker, nvidia-container-toolkit)
+4. Under **Expose Ports**, add port **`5001`** (Flask app) — port 22 is included by default
+5. Click **Deploy**
+6. Note your pod's **SSH host and port** from the Connect panel
+
+### 3.3 — Configure .env.gpu
+
+Edit `.env.gpu` in the project root on your local machine:
 
 ```env
 # Flask
-SECRET_KEY=change-me-to-a-random-string-32-chars
+SECRET_KEY=<run: python3 -c "import secrets; print(secrets.token_hex(32))">
+FLASK_ENV=production
 DEBUG=False
 HOST=0.0.0.0
 PORT=5001
 
-# ML Models
+# GPU inference — mandatory
+INFERENCE_DEVICE=cuda:0
+
+# Trained pothole model (place best.pt at ./models/best.pt before deploying)
+MODEL_PATH=/app/models/best.pt
+POTHOLE_MODEL_PATH=/app/models/best.pt
+
+# ML models
 YOLO_MODEL=yolov8n.pt
 SEGMENTATION_BACKEND=deeplabv3
 USE_SEGMENTATION=True
@@ -125,247 +148,130 @@ SMTP_USERNAME=your@gmail.com
 SMTP_PASSWORD=your-gmail-app-password
 PERSONAL_REPORT_EMAIL=your@gmail.com
 
-# Performance
-FRAME_SKIP=2
+# GPU performance — process every frame
+FRAME_SKIP=1
 MAX_FRAME_WIDTH=640
 MAX_UPLOAD_MB=500
+
+# Prevent CUDA memory fragmentation on long sessions
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 ```
 
-**Generate a SECRET_KEY:**
+**Generate SECRET_KEY:**
 ```bash
 python3 -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-**Gmail App Password (for email reports):**
-1. Go to Google Account → Security → 2-Step Verification → App passwords
-2. Create a password for "Mail"
-3. Paste the 16-character code as `SMTP_PASSWORD`
+**Gmail App Password** (for email reports):
+1. Google Account → Security → 2-Step Verification → App passwords
+2. Create for "Mail" → paste the 16-character code as `SMTP_PASSWORD`
 
-### 3.2 GPU / RunPod
+### 3.4 — Update deploy_runpod.sh with your pod's IP and port
 
-Edit `.env.gpu`. It has the same keys plus:
+Open [scripts/deploy_runpod.sh](scripts/deploy_runpod.sh) and set:
 
-```env
-# Force GPU inference
-INFERENCE_DEVICE=cuda:0
-
-# Point to your trained pothole model (optional)
-MODEL_PATH=/app/models/best.pt
-POTHOLE_MODEL_PATH=/app/models/best.pt
-
-# GPU performance
-FRAME_SKIP=1                   # GPU can handle every frame
-MAX_UPLOAD_MB=500
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+```bash
+RUNPOD_HOST="<your pod IP>"      # e.g. 213.173.188.103
+RUNPOD_PORT="<your pod SSH port>" # e.g. 36713
 ```
 
 ---
 
-## 4. Path A — Run Locally (Python)
+## 4. Deploy to RunPod
 
-Use this for development or quick testing without Docker.
-
-### Step 1 — Clone and enter the project
-
-```bash
-git clone <your-repo-url> Pothole-I
-cd Pothole-I
-```
-
-### Step 2 — Create a virtual environment
-
-```bash
-python3 -m venv venv
-source venv/bin/activate          # Mac / Linux
-# venv\Scripts\activate           # Windows
-```
-
-### Step 3 — Install dependencies
-
-```bash
-pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-> First install takes 3–8 minutes. PyTorch alone is ~1 GB.
-
-### Step 4 — Configure environment
-
-```bash
-cp .env .env.backup    # keep a backup
-# Edit .env — set SECRET_KEY and any API keys you want
-```
-
-### Step 5 — Run the app
-
-```bash
-python app.py
-```
-
-You should see:
-```
-* Running on http://0.0.0.0:5001
-* SocketIO server started
-```
-
-### Step 6 — Open the dashboard
-
-Open your browser: **http://localhost:5001**
-
-The first page load triggers model loading (DeepLabV3 + YOLO).  
-Wait ~30–60 seconds for the pipeline to be ready.
-
----
-
-## 5. Path B — Run with Docker (CPU, any machine)
-
-Use this for a clean, reproducible CPU deployment without touching Python on your host.
-
-### Step 1 — Install Docker Desktop
-
-Download from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop) and start it.
-
-Verify:
-```bash
-docker --version
-docker compose version
-```
-
-### Step 2 — Clone the project
-
-```bash
-git clone <your-repo-url> Pothole-I
-cd Pothole-I
-```
-
-### Step 3 — Configure .env
-
-Edit `.env` with your SECRET_KEY and API keys (see Section 3.1).
-
-### Step 4 — Build and start
-
-First run (downloads base image + installs ~1 GB Python packages):
-```bash
-docker compose up --build
-```
-
-Subsequent runs (image already built, starts in seconds):
-```bash
-docker compose up
-```
-
-Run in background:
-```bash
-docker compose up -d
-```
-
-### Step 5 — Open the dashboard
-
-**http://localhost:5001**
-
-### Useful Docker commands
-
-```bash
-# Tail live logs
-docker compose logs -f
-
-# Stop the container
-docker compose down
-
-# Rebuild after code changes
-docker compose up --build
-
-# Open a shell inside the running container
-docker exec -it ai-eyes-on-the-road bash
-
-# Check container health
-docker compose ps
-```
-
-### What the volumes do
-
-| Host path | Container path | Purpose |
-|---|---|---|
-| `./uploads` | `/app/uploads` | Uploaded videos survive restarts |
-| `./outputs` | `/app/outputs` | Annotated videos survive restarts |
-| `./static/snapshots` | `/app/static/snapshots` | Pothole frame crops |
-| `./database` | `/app/database` | SQLite DB survives restarts |
-| `./models` | `/app/models` | Custom YOLO model (hot-swap) |
-| `./.cache/torch` | `/root/.cache/torch` | DeepLabV3 weights cache (saves ~170 MB re-download) |
-
----
-
-## 6. Path C — Run on RunPod GPU
-
-This deploys the project into a Docker container on a RunPod cloud GPU pod.  
-The GPU accelerates YOLO, segmentation, and depth estimation significantly.
-
-### 6.1 — Create a RunPod Pod
-
-1. Log in at [runpod.io](https://www.runpod.io)
-2. Click **Deploy** → **GPU Pod**
-3. Select a GPU (A40 recommended — 48 GB VRAM)
-4. Set the template to **RunPod PyTorch 2.4.1** (CUDA 12.4 pre-installed)
-5. Under **Expose Ports**, add:
-   - `5001` (the Flask app)
-   - `22` is already included for SSH
-6. Click **Deploy**
-
-### 6.2 — Add your SSH key to RunPod
-
-1. RunPod dashboard → **Settings** → **SSH Keys**
-2. Paste your **public key** (`~/.ssh/id_ed25519.pub` or `~/.ssh/id_rsa.pub`)
-3. Save
-
-### 6.3 — Get your pod's SSH connection details
-
-In the pod card, click **Connect**. You'll see something like:
-
-```
-SSH:  ssh root@213.173.188.103 -p 36713 -i ~/.ssh/id_ed25519
-```
-
-Write down the **host IP** and **port** — you'll need them.
-
-### 6.4 — Configure .env.gpu on your local machine
-
-Edit `.env.gpu` in the project root before uploading:
-
-```env
-SECRET_KEY=<generate with: python3 -c "import secrets; print(secrets.token_hex(32))">
-SMTP_PASSWORD=<your Gmail app password>
-# Everything else is already set correctly
-```
-
-### 6.5 — Run the deploy script
-
-From your local machine's terminal:
+All deployment uses a single script. Run this from your local machine's terminal.
 
 ```bash
 cd ~/Desktop/Pothole-I
 bash scripts/deploy_runpod.sh
 ```
 
-**What the script does automatically:**
+### What the script does
 
 | Step | Action |
 |---|---|
-| 1 | rsync project files to `/workspace/Pothole-I` on RunPod (skips `.git`, `.cache`, build artifacts) |
-| 2 | Builds the GPU Docker image on RunPod (CUDA 12.4 + PyTorch 2.4.1+cu124) |
-| 3 | Starts the container via `docker-compose.gpu.yml` |
-| 4 | Prints access instructions |
+| **1 — Sync** | rsync project files to `/workspace/Pothole-I` on RunPod (skips `.git`, `.cache`, build artifacts, large uploads) |
+| **2 — Build** | Builds `Dockerfile.gpu` on RunPod — CUDA 12.4, PyTorch 2.4.1+cu124, all dependencies |
+| **3 — Start** | Runs `docker compose -f docker-compose.gpu.yml up -d` on RunPod |
 
-> **First build takes 5–15 minutes** — PyTorch CUDA wheels alone are ~2.5 GB.  
-> Subsequent deploys (code changes only) take ~1–2 minutes.
+> **First build time: 5–15 minutes** — PyTorch CUDA wheels are ~2.5 GB.  
+> Subsequent deploys (code changes only): ~1–2 minutes (layer cache hit).
 
-### 6.6 — Verify GPU is working
+### What gets volume-mounted (persists across container restarts)
 
-After the container starts, run:
+| Host path (RunPod) | Container path | Contents |
+|---|---|---|
+| `./uploads` | `/app/uploads` | Uploaded video files |
+| `./outputs` | `/app/outputs` | Annotated output videos |
+| `./static/snapshots` | `/app/static/snapshots` | Pothole frame crops |
+| `./database` | `/app/database` | SQLite database |
+| `./models` | `/app/models` | YOLO weights + custom pothole model |
+| `./.cache/torch` | `/root/.cache/torch` | DeepLabV3 weight cache (~170 MB, saves re-download) |
+
+---
+
+## 5. Access the Dashboard
+
+### Option A — SSH tunnel (always works, no extra RunPod config)
+
+Open a new terminal on your local machine:
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 -p 36713 root@<YOUR_POD_IP> \
-  "docker exec ai-eyes-on-the-road-gpu python3 -c \
-  \"import torch; print('CUDA:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0))\""
+ssh -L 5001:localhost:5001 -i ~/.ssh/id_ed25519 -p <RUNPOD_PORT> root@<RUNPOD_HOST>
+```
+
+Keep that terminal open, then open: **http://localhost:5001**
+
+### Option B — Direct RunPod proxy URL
+
+1. Pod card → **Connect** → **HTTP Services**
+2. If port 5001 is listed, click the link directly
+3. If not listed, click **+ Expose Port** → add `5001` → Save
+
+---
+
+## 6. Managing the Container
+
+All management commands are run via SSH from your local terminal.
+
+### SSH into the pod
+
+```bash
+ssh -i ~/.ssh/id_ed25519 -p <RUNPOD_PORT> root@<RUNPOD_HOST>
+cd /workspace/Pothole-I
+```
+
+### Container lifecycle
+
+```bash
+# Check status and health
+docker compose -f docker-compose.gpu.yml ps
+
+# Tail live logs
+docker compose -f docker-compose.gpu.yml logs -f
+
+# Stop
+docker compose -f docker-compose.gpu.yml down
+
+# Start (image already built)
+docker compose -f docker-compose.gpu.yml up -d
+
+# Rebuild after Dockerfile or requirements.txt changes
+docker compose -f docker-compose.gpu.yml up --build -d
+```
+
+### Open a shell inside the running container
+
+```bash
+docker exec -it ai-eyes-on-the-road-gpu bash
+```
+
+### Verify GPU is active inside the container
+
+```bash
+docker exec ai-eyes-on-the-road-gpu python3 -c \
+  "import torch; print('CUDA:', torch.cuda.is_available()); \
+   print('GPU:', torch.cuda.get_device_name(0))"
 ```
 
 Expected output:
@@ -374,129 +280,98 @@ CUDA: True
 GPU: NVIDIA A40
 ```
 
-Or run the full readiness check:
-```bash
-ssh -i ~/.ssh/id_ed25519 -p 36713 root@<YOUR_POD_IP> \
-  "docker exec ai-eyes-on-the-road-gpu python scripts/verify_gpu.py"
-```
-
-### 6.7 — Access the dashboard
-
-**Option A — SSH tunnel (works immediately, no RunPod UI changes needed):**
+### Run the full GPU readiness check
 
 ```bash
-ssh -L 5001:localhost:5001 -i ~/.ssh/id_ed25519 -p 36713 root@<YOUR_POD_IP>
+docker exec ai-eyes-on-the-road-gpu python scripts/verify_gpu.py
 ```
 
-Keep this terminal open, then open **http://localhost:5001** in your browser.
+Checks: CUDA availability, VRAM, PyTorch version, YOLO smoke test, nvidia-smi snapshot.
 
-**Option B — RunPod proxy URL:**
-
-1. In the pod card, click **Connect** → **HTTP Services**
-2. If port 5001 appears, click the link to open it directly
-3. If it doesn't appear, click **+ Expose Port** → add `5001` → Save
-
-### 6.8 — Tail logs on RunPod
+### Check GPU utilization in real time
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 -p 36713 root@<YOUR_POD_IP> \
-  'cd /workspace/Pothole-I && docker compose -f docker-compose.gpu.yml logs -f'
+# On the pod (outside the container)
+watch -n 1 nvidia-smi
 ```
-
-### 6.9 — Manage the container on RunPod
-
-All commands run via SSH from your local terminal:
-
-```bash
-# SSH into the pod first
-ssh -i ~/.ssh/id_ed25519 -p 36713 root@<YOUR_POD_IP>
-
-# Then on the pod:
-cd /workspace/Pothole-I
-
-# Check status
-docker compose -f docker-compose.gpu.yml ps
-
-# Stop
-docker compose -f docker-compose.gpu.yml down
-
-# Restart
-docker compose -f docker-compose.gpu.yml up -d
-
-# Rebuild after code changes
-docker compose -f docker-compose.gpu.yml up --build -d
-
-# Open a shell inside the running container
-docker exec -it ai-eyes-on-the-road-gpu bash
-```
-
-### 6.10 — Re-deploy after code changes
-
-From your local machine, just re-run:
-```bash
-bash scripts/deploy_runpod.sh
-```
-
-The script rsyncs only changed files, then rebuilds and restarts.
 
 ---
 
-## 7. Using the Dashboard
+## 7. Re-Deploy After Code Changes
 
-Open **http://localhost:5001** (or the RunPod URL).
+Edit code locally, then re-run the deploy script:
 
-### 7.1 — Upload a Video
+```bash
+# On your local machine
+cd ~/Desktop/Pothole-I
+bash scripts/deploy_runpod.sh
+```
+
+rsync sends only changed files. The Docker layer cache means only affected layers rebuild.
+
+- **Python file change only** → sync takes ~5 s, container restarts in ~10 s
+- **requirements.txt change** → pip layer rebuilds (~3–5 min)
+- **Dockerfile.gpu change** → full rebuild (~10–15 min)
+
+---
+
+## 8. Using the Dashboard
+
+Open **http://localhost:5001** (SSH tunnel) or the RunPod proxy URL.
+
+### 8.1 — Upload a Video for Processing
 
 1. Click **Upload Video** in the top bar
-2. Select an `.mp4`, `.avi`, `.mov`, `.mkv`, or `.webm` file (max 500 MB)
+2. Select a `.mp4`, `.avi`, `.mov`, `.mkv`, or `.webm` file (max 500 MB)
 3. Click **Process**
-4. Watch the live annotated feed appear in the center panel
-5. After processing, the annotated output is saved to `outputs/`
+4. The live annotated feed appears in the center panel in real time
+5. The processed output video is saved to `outputs/` on the RunPod pod
 
-### 7.2 — Live Camera Mode
+### 8.2 — Live Camera Mode
 
 1. Click **Start Camera**
 2. Allow browser camera access when prompted
-3. The browser captures frames via `getUserMedia` and streams them over WebSocket
-4. Works on both local and RunPod deployments (camera stays on your device)
+3. The browser captures frames via `getUserMedia` on your local device and streams them over WebSocket to the RunPod container
+4. Fully functional — no GPU-side camera device access needed
 
-### 7.3 — Reading the Detection Overlay
+### 8.3 — Detection Overlay Guide
 
 | Color | Meaning |
 |---|---|
 | Red box | Pothole — DANGER (< 5 m) |
-| Yellow box | Pothole — CAUTION (5–15 m) |
+| Orange box | Pothole — CAUTION (5–15 m) |
 | Green box | Pothole — safe distance (> 15 m) |
-| Blue box | General objects (cars, trucks, pedestrians) |
-| Green road overlay | Detected road surface (segmentation mask) |
-| Cyan lines | Lane detection overlay |
+| Cyan box | General objects: cars, trucks, pedestrians |
+| Green road overlay | Detected road surface (DeepLabV3 segmentation mask) |
+| Cyan lane lines | Canny + Hough lane polygon overlay |
 
-### 7.4 — Map View
+### 8.4 — Map View
 
-- Click the **Map** tab to see all detected potholes plotted on a Mapbox map
-- Star markers indicate pothole locations
-- Click a marker for details: GPS, confidence, timestamp, frame snapshot
+- Click the **Map** tab to see all detected potholes on a Mapbox map
+- Star markers indicate pothole GPS locations
+- Click any marker for details: coordinates, confidence score, timestamp, frame snapshot
 
-### 7.5 — Pothole Database Table
+### 8.5 — Pothole Database Table
 
-- The **Potholes** tab lists all detected potholes from the database
+- **Potholes** tab lists all detections stored in SQLite
 - Sort by confidence, date, or distance
-- Click **Report** to send an MDOT report email for that pothole
-- Click **Delete** to remove a record
+- **Report** — sends an MDOT email report for that pothole
+- **Report All Unreported** — batch-sends all pending reports
+- **Delete** — removes the record from the database
 
-### 7.6 — MDOT Email Reporting
+### 8.6 — MDOT Email Reporting
 
-1. Configure `SMTP_USERNAME`, `SMTP_PASSWORD`, and `REPORT_FROM_EMAIL` in `.env`
-2. In the Potholes tab, click **Report** on any pothole
-3. Or click **Report All Unreported** to batch-send
-4. Reports include: GPS coordinates, timestamp, confidence score, risk level, and a frame snapshot image
-5. The system auto-sends follow-ups after 7 days if unacknowledged
+The system sends structured pothole reports via email automatically.
+
+1. `SMTP_USERNAME`, `SMTP_PASSWORD`, `REPORT_FROM_EMAIL` must be set in `.env.gpu`
+2. Each report includes: GPS coordinates + Google Maps link, timestamp, confidence score, risk level, and a pothole frame snapshot image attached
+3. Follow-ups are sent automatically after 7 days if no repair acknowledgment is received
 
 ---
 
-## 8. REST API Reference
+## 9. REST API Reference
 
-Base URL: `http://localhost:5001`
+Base URL: `http://localhost:5001` (or RunPod proxy URL)
 
 | Method | Endpoint | Description |
 |---|---|---|
@@ -510,182 +385,197 @@ Base URL: `http://localhost:5001`
 | `GET` | `/api/stats` | Detection statistics |
 | `GET` | `/api/alerts` | Recent alert history |
 | `GET` | `/api/map-data` | GeoJSON for map rendering |
-| `GET` | `/api/performance` | CPU/memory/GPU metrics |
+| `GET` | `/api/performance` | CPU / memory / GPU metrics |
 
-**Example — get all potholes:**
-```bash
-curl http://localhost:5001/api/potholes
-```
-
-**Example — check health:**
+**Examples:**
 ```bash
 curl http://localhost:5001/api/health
+curl http://localhost:5001/api/stats
+curl http://localhost:5001/api/potholes
 ```
 
 ---
 
-## 9. Configuration Reference
+## 10. Configuration Reference
 
-All variables are set in `.env` (CPU) or `.env.gpu` (GPU).
+All variables are set in `.env.gpu`. Changes require re-deploying.
 
 ### ML Models
 
+| Variable | Value (GPU) | Description |
+|---|---|---|
+| `INFERENCE_DEVICE` | `cuda:0` | GPU device — never change this |
+| `YOLO_MODEL` | `yolov8n.pt` | YOLO variant: n/s/m/l/x |
+| `MODEL_PATH` | `/app/models/best.pt` | Trained pothole model |
+| `POTHOLE_MODEL_PATH` | `/app/models/best.pt` | Legacy alias for MODEL_PATH |
+| `SEGMENTATION_BACKEND` | `deeplabv3` | `deeplabv3` or `segformer` |
+| `USE_SEGMENTATION` | `True` | Enable DeepLabV3 road mask |
+| `USE_DEPTH_MIDAS` | `False` | Enable MiDaS depth (enable on GPU — fast) |
+
+### Detection Thresholds
+
 | Variable | Default | Description |
 |---|---|---|
-| `YOLO_MODEL` | `yolov8n.pt` | YOLO variant: n/s/m/l/x (n=fastest) |
-| `POTHOLE_MODEL_PATH` | `models/pothole_yolov8.pt` | Custom pothole model path (optional) |
-| `SEGMENTATION_BACKEND` | `deeplabv3` | `deeplabv3` \| `segformer` \| `geometric` |
-| `USE_SEGMENTATION` | `True` | Enable/disable road segmentation |
-| `USE_DEPTH_MIDAS` | `False` | Enable MiDaS neural depth (slow on CPU) |
-| `INFERENCE_DEVICE` | `cpu` | `cpu` or `cuda:0` |
-
-### Detection
-
-| Variable | Default | Description |
-|---|---|---|
-| `DETECTION_CONFIDENCE` | `0.35` | YOLO general confidence threshold |
+| `DETECTION_CONFIDENCE` | `0.35` | YOLO general confidence |
 | `POTHOLE_CONFIDENCE` | `0.30` | Pothole-specific confidence |
-| `NMS_THRESHOLD` | `0.45` | Non-max suppression IoU |
-| `POTHOLE_MIN_AREA` | `800` | Min contour area (px²) for CV detection |
-| `USE_LANE_DETECTION` | `True` | Enable Canny+Hough lane polygon |
+| `USE_LANE_DETECTION` | `True` | Enable Canny + Hough lane mask |
 | `LANE_MASK_COMBINE` | `intersect` | `intersect` or `union` for mask merging |
 
 ### Performance
 
-| Variable | Default | Description |
+| Variable | GPU Value | Description |
 |---|---|---|
-| `FRAME_SKIP` | `2` | Process every Nth frame (1=every frame) |
-| `MAX_FRAME_WIDTH` | `640` | Resize width before inference |
-| `JPEG_QUALITY` | `75` | SocketIO stream JPEG quality |
+| `FRAME_SKIP` | `1` | Process every frame (GPU can handle it) |
+| `MAX_FRAME_WIDTH` | `640` | Inference width in pixels |
+| `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` | Prevents VRAM fragmentation |
 
-### Distance / Risk
+### Distance / Risk Zones
 
 | Variable | Default | Description |
 |---|---|---|
 | `NEAR_DISTANCE` | `5.0` | Metres — danger zone (red alert) |
-| `MEDIUM_DISTANCE` | `15.0` | Metres — caution zone (yellow alert) |
+| `MEDIUM_DISTANCE` | `15.0` | Metres — caution zone (orange alert) |
 | `ALERT_COOLDOWN_SEC` | `3.0` | Minimum seconds between alerts |
 
-### Custom Pothole Model
+### Using a Custom Pothole Model
 
-If you have a custom YOLOv8 model trained on pothole data:
-
-1. Copy `best.pt` to `models/pothole_yolov8.pt`
-2. Set in `.env`:
-   ```env
-   POTHOLE_MODEL_PATH=models/pothole_yolov8.pt
+1. Place your `best.pt` at `models/best.pt` in the project root (local machine)
+2. Re-run deploy — rsync will upload it; the volume mount makes it available in the container
+3. Verify it loaded:
+   ```bash
+   docker exec ai-eyes-on-the-road-gpu python3 -c \
+     "from models.model_manager import ModelManager
+   from config import config
+   mm = ModelManager(config); mm.initialize()
+   print('Pothole model:', mm.pothole_yolo)"
    ```
-3. Restart the app or container
 
-The pipeline uses a 3-layer fallback:
-1. Custom pothole model (if file exists)
-2. YOLO COCO general model
+Detection uses a 3-layer strategy:
+1. Custom pothole model (if `best.pt` exists)
+2. YOLOv8 COCO general model
 3. OpenCV anomaly detection on the road mask
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
-### App won't start — port already in use
+### Deploy script fails — SSH timeout
 
-```bash
-# Find what's using port 5001
-lsof -i :5001
-# Kill it
-kill -9 <PID>
-```
+- Confirm the pod is running in RunPod dashboard (green status)
+- Confirm `RUNPOD_HOST` and `RUNPOD_PORT` in `deploy_runpod.sh` match the current pod's Connect details (pods get new IPs on restart)
 
-Or change the port in `.env`:
-```env
-PORT=5002
-```
-
-### Docker build fails — network error
+### Container won't start — check logs
 
 ```bash
-# Retry with no cache
-docker compose build --no-cache
+ssh -i ~/.ssh/id_ed25519 -p <PORT> root@<HOST> \
+  'cd /workspace/Pothole-I && docker compose -f docker-compose.gpu.yml logs --tail=100'
 ```
 
-### Container starts but page doesn't load
-
-Check logs for errors:
-```bash
-docker compose logs -f
-```
-
-Wait up to 120 seconds — the health check has a 2-minute start window for model loading.
-
-### CUDA not available on RunPod
+### CUDA not available inside container
 
 ```bash
-# Check on the pod
+# On the pod — check NVIDIA runtime
 nvidia-smi
 docker run --rm --gpus all nvidia/cuda:12.4.1-base nvidia-smi
 ```
 
-If `nvidia-smi` works but Docker can't see the GPU:
+If docker can't see the GPU:
 ```bash
-# On the pod (RunPod has this pre-installed, but check)
+# Should already be done on RunPod, but verify:
 apt-get install -y nvidia-container-toolkit
 systemctl restart docker
 ```
 
-### DeepLabV3 / model download fails inside container
+### Out of VRAM
 
-The `.cache/torch` volume mounts the weight cache from the host.  
-If the download failed mid-way, clear the cache:
-
+Check current VRAM usage:
 ```bash
-# On your local machine (CPU Docker)
-rm -rf .cache/torch
-
-# Or on RunPod
-ssh -i ~/.ssh/id_ed25519 -p 36713 root@<IP> "rm -rf /workspace/Pothole-I/.cache/torch"
+docker exec ai-eyes-on-the-road-gpu nvidia-smi
 ```
 
-Then restart the container — it will re-download cleanly.
+Reduce memory pressure in `.env.gpu`:
+```env
+MAX_FRAME_WIDTH=416        # smaller inference resolution
+FRAME_SKIP=2               # process every other frame
+USE_DEPTH_MIDAS=False      # disable MiDaS if enabled
+```
+
+### DeepLabV3 weights re-downloading every restart
+
+The `.cache/torch` volume should prevent this. If it's re-downloading:
+```bash
+# Verify the cache volume exists on the pod
+ssh -i ~/.ssh/id_ed25519 -p <PORT> root@<HOST> \
+  'ls /workspace/Pothole-I/.cache/torch/hub/checkpoints/'
+```
+
+If missing, the first run will download (~170 MB) and cache it for all future restarts.
 
 ### Video upload fails
 
-- Check `MAX_UPLOAD_MB` in `.env` (default 500)
+- Check `MAX_UPLOAD_MB=500` in `.env.gpu`
 - Supported formats: `.mp4`, `.avi`, `.mov`, `.mkv`, `.webm`, `.m4v`
-- Check the `uploads/` directory is writable
+- Confirm the `uploads/` volume directory exists: `ls /workspace/Pothole-I/uploads/`
 
 ### Email reports not sending
 
-1. Confirm `SMTP_USERNAME` and `SMTP_PASSWORD` are set
-2. Use a Gmail App Password (not your normal password) — see Section 3.1
-3. Test manually:
-   ```bash
-   python3 -c "
-   import smtplib
-   s = smtplib.SMTP('smtp.gmail.com', 587)
-   s.ehlo(); s.starttls()
-   s.login('your@gmail.com', 'your-app-password')
-   print('SMTP OK')
-   s.quit()
-   "
-   ```
-
-### Performance is slow on CPU
-
-Try these settings in `.env`:
-```env
-USE_SEGMENTATION=False     # biggest speedup — disables DeepLabV3
-FRAME_SKIP=3               # process every 3rd frame
-MAX_FRAME_WIDTH=416        # smaller inference size
-USE_LANE_DETECTION=False   # disable Canny+Hough pass
+Test SMTP connectivity inside the container:
+```bash
+docker exec ai-eyes-on-the-road-gpu python3 -c "
+import smtplib, os
+s = smtplib.SMTP('smtp.gmail.com', 587)
+s.ehlo(); s.starttls()
+s.login(os.environ['SMTP_USERNAME'], os.environ['SMTP_PASSWORD'])
+print('SMTP OK')
+s.quit()
+"
 ```
 
-Expected FPS by config:
+### Pod IP changed after restart
 
-| Config | Approx FPS |
-|---|---|
-| Full pipeline (CPU) | 3–8 |
-| No segmentation (CPU) | 10–15 |
-| GPU (A40, full pipeline) | 25–60 |
+RunPod assigns a new IP each time a pod restarts. Update `deploy_runpod.sh`:
+```bash
+RUNPOD_HOST="<new IP>"
+RUNPOD_PORT="<new port>"
+```
+
+Then re-run `bash scripts/deploy_runpod.sh`.
 
 ---
 
-*AI Eyes on the Road — Built with YOLOv8 · OpenCV · Flask · SocketIO · SQLAlchemy*
+## Quick Reference Card
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  AI Eyes on the Road — RunPod GPU Quick Reference
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DEPLOY (from local machine):
+  bash scripts/deploy_runpod.sh
+
+SSH INTO POD:
+  ssh -i ~/.ssh/id_ed25519 -p <PORT> root@<HOST>
+
+ACCESS APP (SSH tunnel):
+  ssh -L 5001:localhost:5001 -i ~/.ssh/id_ed25519 -p <PORT> root@<HOST>
+  → http://localhost:5001
+
+TAIL LOGS:
+  ssh ... 'cd /workspace/Pothole-I && \
+    docker compose -f docker-compose.gpu.yml logs -f'
+
+CONTAINER SHELL:
+  docker exec -it ai-eyes-on-the-road-gpu bash
+
+GPU CHECK:
+  docker exec ai-eyes-on-the-road-gpu python scripts/verify_gpu.py
+
+RESTART CONTAINER:
+  docker compose -f docker-compose.gpu.yml down
+  docker compose -f docker-compose.gpu.yml up -d
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+---
+
+*AI Eyes on the Road · RunPod GPU Edition · YOLOv8 · DeepLabV3 · Flask · SocketIO*
